@@ -1,0 +1,3 @@
+# parse_options: { "target_version": "3.8" }
+@buttons.clicked.connect
+def spam(): ...
