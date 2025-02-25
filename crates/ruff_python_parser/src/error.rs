@@ -480,6 +480,7 @@ macro_rules! syntax_errors {
 syntax_errors! {
     (MatchBeforePy310, PY310, "`match` statement"),
     (WalrusBeforePy38, PY38, "named assignment expression (`:=`)"),
+    (RelaxedDecoratorBeforePy39, PY39, "named expression in decorator"),
 }
 
 #[cfg(target_pointer_width = "64")]
