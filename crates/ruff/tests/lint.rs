@@ -2670,6 +2670,62 @@ fn walrus_before_py38() {
 }
 
 #[test]
+fn relaxed_decorator_before_py39() {
+    // adapted from [PEP 614](https://peps.python.org/pep-0614/)
+    let stdin = r#"
+buttons = []
+
+@buttons[0].clicked.connect  # error
+def spam1(): ...
+
+@eval("buttons[0].clicked.connect")  # ok
+def spam2(): ...
+
+def _(x): return x
+@_(buttons[0].clicked.connect)  # ok
+def spam3(): ...
+"#;
+
+    // ok
+    assert_cmd_snapshot!(Command::new(get_cargo_bin(BIN_NAME))
+        .args(STDIN_BASE_OPTIONS)
+        .args(["--stdin-filename", "test.py"])
+        .arg("--target-version=py39")
+        .arg("--ignore=E701")
+        .arg("-")
+        .pass_stdin(stdin),
+        @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    All checks passed!
+
+    ----- stderr -----
+    "
+    );
+
+    // not ok on 3.8 with preview
+    assert_cmd_snapshot!(Command::new(get_cargo_bin(BIN_NAME))
+        .args(STDIN_BASE_OPTIONS)
+        .args(["--stdin-filename", "test.py"])
+        .arg("--target-version=py38")
+        .arg("--ignore=E701")
+        .arg("--preview")
+        .arg("-")
+        .pass_stdin(stdin),
+        @r"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    test.py:4:1: SyntaxError: Cannot use named expression in decorator on Python 3.8 (syntax was added in Python 3.9)
+    Found 1 error.
+
+    ----- stderr -----
+    "
+    );
+}
+
+#[test]
 fn match_before_py310() {
     // ok on 3.10
     assert_cmd_snapshot!(Command::new(get_cargo_bin(BIN_NAME))
