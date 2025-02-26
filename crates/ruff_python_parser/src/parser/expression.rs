@@ -879,7 +879,7 @@ impl<'src> Parser<'src> {
             {
                 self.add_unsupported_syntax_error(
                     UnsupportedSyntaxErrorKind::UnparWalrusBefore310,
-                    self.node_range(start),
+                    lower.range(),
                 );
             }
 
@@ -1663,7 +1663,7 @@ impl<'src> Parser<'src> {
                 {
                     self.add_unsupported_syntax_error(
                         UnsupportedSyntaxErrorKind::UnparWalrusBefore310,
-                        self.node_range(start),
+                        key_or_element.range(),
                     );
                 }
 
@@ -1715,7 +1715,7 @@ impl<'src> Parser<'src> {
                 {
                     self.add_unsupported_syntax_error(
                         UnsupportedSyntaxErrorKind::UnparWalrusBefore310,
-                        self.node_range(start),
+                        key_or_element.range(),
                     );
                 }
                 Expr::Set(self.parse_set_expression(key_or_element.expr, start))
@@ -1885,7 +1885,7 @@ impl<'src> Parser<'src> {
             {
                 parser.add_unsupported_syntax_error(
                     UnsupportedSyntaxErrorKind::UnparWalrusBefore310,
-                    parser.node_range(start),
+                    parsed_expr.range(),
                 );
             }
 
