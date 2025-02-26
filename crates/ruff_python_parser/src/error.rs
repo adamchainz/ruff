@@ -481,6 +481,7 @@ syntax_errors! {
     (MatchBeforePy310, PY310, "`match` statement"),
     (WalrusBeforePy38, PY38, "named assignment expression (`:=`)"),
     (RelaxedDecoratorBeforePy39, PY39, "named expression in decorator"),
+    (UnparWalrusBefore310, PY310, "unparenthesized assignment expression"),
 }
 
 #[cfg(target_pointer_width = "64")]
