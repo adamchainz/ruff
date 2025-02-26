@@ -1,3 +1,3 @@
-# parse_options: { "target_version": "3.8" }
+# parse_options: { "target-version": "3.8" }
 @eval("buttons[0].clicked.connect")
 def spam(): ...
