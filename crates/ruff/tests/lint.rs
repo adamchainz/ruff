@@ -2781,8 +2781,7 @@ l[(x:=1):-1]
     test.py:6:5: SyntaxError: Cannot use unparenthesized assignment expression on Python 3.9 (syntax was added in Python 3.10)
     test.py:7:5: SyntaxError: Cannot use unparenthesized assignment expression on Python 3.9 (syntax was added in Python 3.10)
     test.py:10:3: SyntaxError: Unparenthesized named expression cannot be used here
-    test.py:10:3: SyntaxError: Cannot use unparenthesized assignment expression on Python 3.9 (syntax was added in Python 3.10)
-    Found 6 errors.
+    Found 5 errors.
 
     ----- stderr -----
     "
