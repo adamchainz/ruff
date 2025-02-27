@@ -1,3 +1,5 @@
+use std::sync::{LazyLock, Mutex};
+
 use crate::{
     module_resolver::file_to_module,
     semantic_index::{
@@ -18,6 +20,7 @@ use indexmap::IndexSet;
 use itertools::Itertools as _;
 use ruff_db::files::File;
 use ruff_python_ast::{self as ast, PythonVersion};
+use rustc_hash::FxHashSet;
 
 use super::{
     class_base::ClassBase, infer_expression_type, infer_unpack_types, IntersectionBuilder,
@@ -876,13 +879,70 @@ impl<'db> KnownClass {
     }
 
     pub(crate) fn to_instance(self, db: &'db dyn Db) -> Type<'db> {
-        self.to_class_literal(db).to_instance(db)
+        self.to_class_literal(db)
+            .into_class_literal()
+            .map(|ClassLiteralType { class }| Type::instance(class))
+            .unwrap_or_else(Type::unknown)
+    }
+
+    pub(crate) fn try_to_class_literal(
+        self,
+        db: &'db dyn Db,
+    ) -> Result<ClassLiteralType<'db>, KnownClassLookupError<'db>> {
+        let symbol = known_module_symbol(db, self.canonical_module(db), self.as_str(db));
+        match symbol {
+            Symbol::Type(Type::ClassLiteral(class_type), Boundness::Bound) => Ok(class_type),
+            Symbol::Type(Type::ClassLiteral(class_type), Boundness::PossiblyUnbound) => {
+                Err(KnownClassLookupError::ClassPossiblyUnbound {
+                    db,
+                    known_class: self,
+                    class_type,
+                })
+            }
+            Symbol::Type(found_type, _) => Err(KnownClassLookupError::SymbolNotAClass {
+                db,
+                known_class: self,
+                found_type,
+            }),
+            Symbol::Unbound => Err(KnownClassLookupError::ClassNotFound {
+                db,
+                known_class: self,
+            }),
+        }
     }
 
     pub(crate) fn to_class_literal(self, db: &'db dyn Db) -> Type<'db> {
-        known_module_symbol(db, self.canonical_module(db), self.as_str(db))
-            .ignore_possibly_unbound()
-            .unwrap_or(Type::unknown())
+        // a cache of the `KnownClass`es that we have already failed to lookup in typeshed
+        // (and therefore that we've already logged a warning for)
+        static MESSAGES: LazyLock<Mutex<FxHashSet<KnownClass>>> = LazyLock::new(Mutex::default);
+
+        self.try_to_class_literal(db)
+            .map(Type::ClassLiteral)
+            .unwrap_or_else(|lookup_error| {
+                if cfg!(test) {
+                    panic!("{}", lookup_error);
+                } else if MESSAGES.lock().unwrap().insert(self) {
+                    tracing::warn!("{}", lookup_error);
+                    if !matches!(
+                        lookup_error,
+                        KnownClassLookupError::ClassPossiblyUnbound { .. }
+                    ) {
+                        tracing::warn!(
+                            "Falling back to `Type::Unknown` for the symbol `{module}.{class}` instead",
+                            module = self.canonical_module(db).as_str(),
+                            class = self.as_str(db)
+                        );
+                    }
+                }
+
+                match lookup_error {
+                    KnownClassLookupError::ClassPossiblyUnbound { class_type, .. } => {
+                        Type::class_literal(class_type.class)
+                    }
+                    KnownClassLookupError::ClassNotFound { .. }
+                    | KnownClassLookupError::SymbolNotAClass { .. } => Type::unknown(),
+                }
+            })
     }
 
     pub(crate) fn to_subclass_of(self, db: &'db dyn Db) -> Type<'db> {
@@ -895,10 +955,8 @@ impl<'db> KnownClass {
     /// Return `true` if this symbol can be resolved to a class definition `class` in typeshed,
     /// *and* `class` is a subclass of `other`.
     pub(super) fn is_subclass_of(self, db: &'db dyn Db, other: Class<'db>) -> bool {
-        known_module_symbol(db, self.canonical_module(db), self.as_str(db))
-            .ignore_possibly_unbound()
-            .and_then(Type::into_class_literal)
-            .is_some_and(|ClassLiteralType { class }| class.is_subclass_of(db, other))
+        self.try_to_class_literal(db)
+            .is_ok_and(|ClassLiteralType { class }| class.is_subclass_of(db, other))
     }
 
     /// Return the module in which we should look up the definition for this class
@@ -1163,6 +1221,84 @@ impl<'db> KnownClass {
         }
     }
 }
+
+pub(crate) enum KnownClassLookupError<'db> {
+    ClassNotFound {
+        db: &'db dyn Db,
+        known_class: KnownClass,
+    },
+    SymbolNotAClass {
+        db: &'db dyn Db,
+        known_class: KnownClass,
+        found_type: Type<'db>,
+    },
+    ClassPossiblyUnbound {
+        db: &'db dyn Db,
+        known_class: KnownClass,
+        class_type: ClassLiteralType<'db>,
+    },
+}
+
+impl std::fmt::Debug for KnownClassLookupError<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClassNotFound { known_class, db: _ } => f
+                .debug_struct("KnownClassLookupError::ClassNotFound")
+                .field("known_class", known_class)
+                .finish(),
+
+            Self::SymbolNotAClass {
+                known_class,
+                found_type,
+                db: _,
+            } => f
+                .debug_struct("KnownClassLookupError::SymbolNotAClass")
+                .field("known_class", known_class)
+                .field("found_type", found_type)
+                .finish(),
+
+            Self::ClassPossiblyUnbound {
+                known_class,
+                class_type,
+                db: _,
+            } => f
+                .debug_struct("KnownClassLookupError::ClassPossiblyUnbound")
+                .field("known_class", known_class)
+                .field("class_type", class_type)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Display for KnownClassLookupError<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClassNotFound{ known_class, db} => write!(
+                f,
+                "Error looking up `{class}` in typeshed: could not find a symbol by that name in module `{module}`",
+                class = known_class.as_str(*db),
+                module = known_class.canonical_module(*db).as_str()
+            ),
+            Self::SymbolNotAClass { db, known_class, found_type } => write!(
+                f,
+                "Error looking up `{class}` in typeshed: expected to find a class by that name in module `{module}`, \
+                but found a symbol of type `{found_type}` instead",
+                class = known_class.as_str(*db),
+                module = known_class.canonical_module(*db).as_str(),
+                found_type = found_type.display(*db),
+            ),
+            Self::ClassPossiblyUnbound { db, known_class, class_type: _ } => write!(
+                f,
+                "Error looking up `{class}` in typeshed: expected to find a fully bound symbol in module `{module}, \
+                but found one that is possibly unbound",
+                class = known_class.as_str(*db),
+                module = known_class.canonical_module(*db).as_str(),
+            )
+        }
+    }
+}
+
+impl std::error::Error for KnownClassLookupError<'_> {}
 
 /// Enumeration of specific runtime that are special enough to be considered their own type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -1539,7 +1675,7 @@ pub(super) enum MetaclassErrorKind<'db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tests::setup_db;
+    use crate::db::tests::{setup_db, TestDb, TestDbBuilder};
     use crate::module_resolver::resolve_module;
     use strum::IntoEnumIterator;
 
@@ -1556,5 +1692,36 @@ mod tests {
                 "`KnownClass::candidate_from_str` appears to be missing a case for `{class_name}`"
             );
         }
+    }
+
+    fn setup_db_with_broken_typeshed(builtins_file: &str) -> TestDb {
+        TestDbBuilder::new()
+            .with_custom_typeshed("/typeshed")
+            .with_file("/typeshed/stdlib/builtins.pyi", builtins_file)
+            .with_file("/typeshed/stdlib/types.pyi", "class ModuleType: ...")
+            .with_file("/typeshed/stdlib/VERSIONS", "builtins: 3.8-\ntypes: 3.8-")
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    #[should_panic(expected = "could not find a symbol by that name in module `builtins`")]
+    fn known_class_to_class_literal_panics_with_test_feature_enabled() {
+        let db = setup_db_with_broken_typeshed("class object: ...");
+        KnownClass::Int.to_class_literal(&db);
+    }
+
+    #[test]
+    #[should_panic(expected = "could not find a symbol by that name in module `builtins`")]
+    fn known_class_to_instance_panics_with_test_feature_enabled() {
+        let db = setup_db_with_broken_typeshed("class object: ...");
+        KnownClass::Int.to_instance(&db);
+    }
+
+    #[test]
+    #[should_panic(expected = "found a symbol of type `Unknown | Literal[42]` instead")]
+    fn known_class_to_subclass_of_panics_with_test_feature_enabled() {
+        let db = setup_db_with_broken_typeshed("int = 42");
+        KnownClass::Int.to_subclass_of(&db);
     }
 }
