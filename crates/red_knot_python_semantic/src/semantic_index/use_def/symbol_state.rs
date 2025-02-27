@@ -420,8 +420,10 @@ mod tests {
                 } else {
                     def_id.as_u32().to_string()
                 };
-                let predicates = narrowing_constraints
-                    .iter_predicates(live_binding.narrowing_constraint)
+                let narrowing_constraint =
+                    narrowing_constraints.read(&live_binding.narrowing_constraint);
+                let predicates = narrowing_constraint
+                    .iter_predicates()
                     .map(|idx| idx.as_u32().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");

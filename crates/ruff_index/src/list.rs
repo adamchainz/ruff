@@ -63,7 +63,7 @@
 
 use std::cmp::Ordering;
 use std::marker::PhantomData;
-use std::ops::Deref;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::newtype_index;
 use crate::vec::IndexVec;
@@ -104,9 +104,34 @@ struct ListCellId;
 
 /// Stores one or more association lists. This type provides read-only access to the lists.  Use a
 /// [`ListBuilder`] to create lists.
-#[derive(Debug, Eq, PartialEq)]
 pub struct ListStorage<K, V = ()> {
-    cells: IndexVec<ListCellId, ListCell<K, V>>,
+    inner: Arc<RwLock<ListStorageInner<K, V>>>,
+}
+
+impl<K, V> std::fmt::Debug for ListStorage<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ListStorage").finish_non_exhaustive()
+    }
+}
+
+impl<K, V> Eq for ListStorage<K, V>
+where
+    K: Eq,
+    V: Eq,
+{
+}
+
+impl<K, V> PartialEq for ListStorage<K, V>
+where
+    K: Eq,
+    V: Eq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        if Arc::as_ptr(&self.inner) == Arc::as_ptr(&other.inner) {
+            return true;
+        }
+        *self.inner.read().unwrap() == *other.inner.read().unwrap()
+    }
 }
 
 /// Each association list is represented by a sequence of snoc cells. A snoc cell is like the more
@@ -124,17 +149,43 @@ struct ListCell<K, V> {
 
 impl<K, V> ListStorage<K, V> {
     /// Iterates through the entries in a list _in reverse order by key_.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn iter_reverse(&self, list: List<K, V>) -> ListReverseIterator<'_, K, V> {
+    pub fn read(&self, list: &List<K, V>) -> ListReadGuard<'_, K, V> {
+        let inner = self.inner.read().unwrap();
+        ListReadGuard {
+            inner,
+            last: list.last,
+        }
+    }
+}
+
+impl<K, V> ListBuilder<K, V> {
+    /// Iterates through the entries in a list _in reverse order by key_.
+    pub fn read(&self, list: &List<K, V>) -> ListReadGuard<'_, K, V> {
+        let inner = self.inner.read().unwrap();
+        ListReadGuard {
+            inner,
+            last: list.last,
+        }
+    }
+}
+
+pub struct ListReadGuard<'a, K, V = ()> {
+    inner: RwLockReadGuard<'a, ListStorageInner<K, V>>,
+    last: Option<ListCellId>,
+}
+
+impl<K, V> ListReadGuard<'_, K, V> {
+    /// Iterates through the entries in a list _in reverse order by key_.
+    pub fn iter_reverse(&self) -> ListReverseIterator<'_, K, V> {
         ListReverseIterator {
-            storage: self,
-            curr: list.last,
+            inner: &self.inner,
+            curr: self.last,
         }
     }
 }
 
 pub struct ListReverseIterator<'a, K, V> {
-    storage: &'a ListStorage<K, V>,
+    inner: &'a RwLockReadGuard<'a, ListStorageInner<K, V>>,
     curr: Option<ListCellId>,
 }
 
@@ -142,16 +193,20 @@ impl<'a, K, V> Iterator for ListReverseIterator<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cell = &self.storage.cells[self.curr?];
+        let cell = &self.inner.cells[self.curr?];
         self.curr = cell.rest;
         Some((&cell.key, &cell.value))
     }
 }
 
 /// Constructs one or more association lists.
-#[derive(Debug, Eq, PartialEq)]
 pub struct ListBuilder<K, V = ()> {
-    storage: ListStorage<K, V>,
+    inner: Arc<RwLock<ListStorageInner<K, V>>>,
+}
+
+#[derive(Eq, PartialEq)]
+struct ListStorageInner<K, V> {
+    cells: IndexVec<ListCellId, ListCell<K, V>>,
 
     /// Scratch space that lets us implement our list operations iteratively instead of
     /// recursively.
@@ -181,29 +236,21 @@ pub struct ListBuilder<K, V = ()> {
 impl<K, V> Default for ListBuilder<K, V> {
     fn default() -> Self {
         ListBuilder {
-            storage: ListStorage {
+            inner: Arc::new(RwLock::new(ListStorageInner {
                 cells: IndexVec::default(),
-            },
-            scratch: Vec::default(),
+                scratch: Vec::default(),
+            })),
         }
     }
 }
 
-impl<K, V> Deref for ListBuilder<K, V> {
-    type Target = ListStorage<K, V>;
-    fn deref(&self) -> &ListStorage<K, V> {
-        &self.storage
+impl<K, V> std::fmt::Debug for ListBuilder<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ListBuilder").finish_non_exhaustive()
     }
 }
 
-impl<K, V> ListBuilder<K, V> {
-    /// Finalizes a `ListBuilder`. After calling this, you cannot create any new lists managed by
-    /// this storage.
-    pub fn build(mut self) -> ListStorage<K, V> {
-        self.storage.cells.shrink_to_fit();
-        self.storage
-    }
-
+impl<K, V> ListStorageInner<K, V> {
     /// Adds a new cell to the list.
     ///
     /// Adding an element always returns a non-empty list, which means we could technically use `I`
@@ -212,7 +259,16 @@ impl<K, V> ListBuilder<K, V> {
     /// list.
     #[allow(clippy::unnecessary_wraps)]
     fn add_cell(&mut self, rest: Option<ListCellId>, key: K, value: V) -> Option<ListCellId> {
-        Some(self.storage.cells.push(ListCell { rest, key, value }))
+        Some(self.cells.push(ListCell { rest, key, value }))
+    }
+}
+
+impl<K, V> ListBuilder<K, V> {
+    /// Finalizes a `ListBuilder`. After calling this, you cannot create any new lists managed by
+    /// this storage.
+    pub fn build(self) -> ListStorage<K, V> {
+        self.inner.write().unwrap().cells.shrink_to_fit();
+        ListStorage { inner: self.inner }
     }
 
     /// Inserts a key and value into a list, if the key is not already present.
@@ -231,7 +287,8 @@ impl<K, V> ListBuilder<K, V> {
         K: Clone + Ord,
         V: Clone,
     {
-        self.scratch.clear();
+        let mut inner = self.inner.write().unwrap();
+        inner.scratch.clear();
 
         // Iterate through the input list, looking for the position where the key should be
         // inserted. We will need to create new list cells for any elements that appear after the
@@ -240,7 +297,7 @@ impl<K, V> ListBuilder<K, V> {
         // (and any succeeding keys) onto.
         let mut curr = list.last;
         while let Some(curr_id) = curr {
-            let cell = &self.storage.cells[curr_id];
+            let cell = &inner.cells[curr_id];
             match key.cmp(&cell.key) {
                 // If the list already contains `key`, we don't need to replace anything, and can
                 // return the original list unmodified.
@@ -252,18 +309,19 @@ impl<K, V> ListBuilder<K, V> {
                 // for this entry in the result list, so add its contents to the scratch
                 // accumulator.
                 Ordering::Less => {
+                    let rest = cell.rest;
                     let new_key = cell.key.clone();
                     let new_value = cell.value.clone();
-                    self.scratch.push((new_key, new_value));
-                    curr = cell.rest;
+                    inner.scratch.push((new_key, new_value));
+                    curr = rest;
                 }
             }
         }
 
         let mut last = curr;
-        last = self.add_cell(last, key, value);
-        while let Some((key, value)) = self.scratch.pop() {
-            last = self.add_cell(last, key, value);
+        last = inner.add_cell(last, key, value);
+        while let Some((key, value)) = inner.scratch.pop() {
+            last = inner.add_cell(last, key, value);
         }
         List::new(last)
     }
@@ -280,7 +338,8 @@ impl<K, V> ListBuilder<K, V> {
         V: Clone,
         F: FnMut(&V, &V) -> V,
     {
-        self.scratch.clear();
+        let mut inner = self.inner.write().unwrap();
+        inner.scratch.clear();
 
         // Zip through the lists, building up the keys/values of the new entries into our scratch
         // vector. Continue until we run out of elements in either list. (Any remaining elements in
@@ -288,16 +347,18 @@ impl<K, V> ListBuilder<K, V> {
         let mut a = a.last;
         let mut b = b.last;
         while let (Some(a_id), Some(b_id)) = (a, b) {
-            let a_cell = &self.storage.cells[a_id];
-            let b_cell = &self.storage.cells[b_id];
+            let a_cell = &inner.cells[a_id];
+            let b_cell = &inner.cells[b_id];
             match a_cell.key.cmp(&b_cell.key) {
                 // Both lists contain this key; combine their values
                 Ordering::Equal => {
+                    let a_rest = a_cell.rest;
+                    let b_rest = b_cell.rest;
                     let new_key = a_cell.key.clone();
                     let new_value = combine(&a_cell.value, &b_cell.value);
-                    self.scratch.push((new_key, new_value));
-                    a = a_cell.rest;
-                    b = b_cell.rest;
+                    inner.scratch.push((new_key, new_value));
+                    a = a_rest;
+                    b = b_rest;
                 }
                 // a's key is only present in a, so it's not included in the result.
                 Ordering::Greater => a = a_cell.rest,
@@ -309,8 +370,8 @@ impl<K, V> ListBuilder<K, V> {
         // Once the iteration loop terminates, we stitch the new entries back together into proper
         // alist cells.
         let mut last = None;
-        while let Some((key, value)) = self.scratch.pop() {
-            last = self.add_cell(last, key, value);
+        while let Some((key, value)) = inner.scratch.pop() {
+            last = inner.add_cell(last, key, value);
         }
         List::new(last)
     }
@@ -325,7 +386,8 @@ impl<K, V> ListBuilder<K, V> {
         V: Clone,
         F: FnMut(&V, &V) -> V,
     {
-        self.scratch.clear();
+        let mut inner = self.inner.write().unwrap();
+        inner.scratch.clear();
 
         // Zip through the lists, building up the keys/values of the new entries into our scratch
         // vector. Continue until we run out of elements in either list. (Any remaining elements in
@@ -341,38 +403,42 @@ impl<K, V> ListBuilder<K, V> {
                 (Some(a_id), Some(b_id)) => (a_id, b_id),
             };
 
-            let a_cell = &self.storage.cells[a_id];
-            let b_cell = &self.storage.cells[b_id];
+            let a_cell = &inner.cells[a_id];
+            let b_cell = &inner.cells[b_id];
             match a_cell.key.cmp(&b_cell.key) {
                 // Both lists contain this key; combine their values
                 Ordering::Equal => {
+                    let a_rest = a_cell.rest;
+                    let b_rest = b_cell.rest;
                     let new_key = a_cell.key.clone();
                     let new_value = combine(&a_cell.value, &b_cell.value);
-                    self.scratch.push((new_key, new_value));
-                    a = a_cell.rest;
-                    b = b_cell.rest;
+                    inner.scratch.push((new_key, new_value));
+                    a = a_rest;
+                    b = b_rest;
                 }
                 // a's key goes into the result next
                 Ordering::Greater => {
+                    let a_rest = a_cell.rest;
                     let new_key = a_cell.key.clone();
                     let new_value = a_cell.value.clone();
-                    self.scratch.push((new_key, new_value));
-                    a = a_cell.rest;
+                    inner.scratch.push((new_key, new_value));
+                    a = a_rest;
                 }
                 // b's key goes into the result next
                 Ordering::Less => {
+                    let b_rest = b_cell.rest;
                     let new_key = b_cell.key.clone();
                     let new_value = b_cell.value.clone();
-                    self.scratch.push((new_key, new_value));
-                    b = b_cell.rest;
+                    inner.scratch.push((new_key, new_value));
+                    b = b_rest;
                 }
             }
         };
 
         // Once the iteration loop terminates, we stitch the new entries back together into proper
         // alist cells.
-        while let Some((key, value)) = self.scratch.pop() {
-            last = self.add_cell(last, key, value);
+        while let Some((key, value)) = inner.scratch.pop() {
+            last = inner.add_cell(last, key, value);
         }
         List::new(last)
     }
@@ -381,19 +447,18 @@ impl<K, V> ListBuilder<K, V> {
 // ----
 // Sets
 
-impl<K> ListStorage<K, ()> {
+impl<K> ListReadGuard<'_, K, ()> {
     /// Iterates through the elements in a set _in reverse order_.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn iter_set_reverse(&self, set: List<K, ()>) -> ListSetReverseIterator<K> {
+    pub fn iter_set_reverse(&self) -> ListSetReverseIterator<K> {
         ListSetReverseIterator {
-            storage: self,
-            curr: set.last,
+            inner: &self.inner,
+            curr: self.last,
         }
     }
 }
 
 pub struct ListSetReverseIterator<'a, K> {
-    storage: &'a ListStorage<K, ()>,
+    inner: &'a RwLockReadGuard<'a, ListStorageInner<K, ()>>,
     curr: Option<ListCellId>,
 }
 
@@ -401,7 +466,7 @@ impl<'a, K> Iterator for ListSetReverseIterator<'a, K> {
     type Item = &'a K;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cell = &self.storage.cells[self.curr?];
+        let cell = &self.inner.cells[self.curr?];
         self.curr = cell.rest;
         Some(&cell.key)
     }
@@ -448,12 +513,13 @@ mod tests {
     // ----
     // Sets
 
-    impl<K> ListStorage<K>
+    impl<K> ListBuilder<K>
     where
         K: Display,
     {
-        fn display_set(&self, list: List<K, ()>) -> String {
-            let elements: Vec<_> = self.iter_set_reverse(list).collect();
+        fn display_set(&self, list: &List<K, ()>) -> String {
+            let list = self.read(list);
+            let elements: Vec<_> = list.iter_set_reverse().collect();
             let mut result = String::new();
             result.push('[');
             for element in elements.into_iter().rev() {
@@ -477,22 +543,22 @@ mod tests {
         let set12 = builder.insert(set1, 2);
         let set123 = builder.insert(set12, 3);
         let set1232 = builder.insert(set123, 2);
-        assert_eq!(builder.display_set(empty), "[]");
-        assert_eq!(builder.display_set(set1), "[1]");
-        assert_eq!(builder.display_set(set12), "[1, 2]");
-        assert_eq!(builder.display_set(set123), "[1, 2, 3]");
-        assert_eq!(builder.display_set(set1232), "[1, 2, 3]");
+        assert_eq!(builder.display_set(&empty), "[]");
+        assert_eq!(builder.display_set(&set1), "[1]");
+        assert_eq!(builder.display_set(&set12), "[1, 2]");
+        assert_eq!(builder.display_set(&set123), "[1, 2, 3]");
+        assert_eq!(builder.display_set(&set1232), "[1, 2, 3]");
 
         // And in reverse order
         let set3 = builder.insert(empty, 3);
         let set32 = builder.insert(set3, 2);
         let set321 = builder.insert(set32, 1);
         let set3212 = builder.insert(set321, 2);
-        assert_eq!(builder.display_set(empty), "[]");
-        assert_eq!(builder.display_set(set3), "[3]");
-        assert_eq!(builder.display_set(set32), "[2, 3]");
-        assert_eq!(builder.display_set(set321), "[1, 2, 3]");
-        assert_eq!(builder.display_set(set3212), "[1, 2, 3]");
+        assert_eq!(builder.display_set(&empty), "[]");
+        assert_eq!(builder.display_set(&set3), "[3]");
+        assert_eq!(builder.display_set(&set32), "[2, 3]");
+        assert_eq!(builder.display_set(&set321), "[1, 2, 3]");
+        assert_eq!(builder.display_set(&set3212), "[1, 2, 3]");
     }
 
     #[test]
@@ -511,21 +577,21 @@ mod tests {
         let set2457 = builder.insert(set245, 7);
 
         let intersection = builder.intersect(empty, empty);
-        assert_eq!(builder.display_set(intersection), "[]");
+        assert_eq!(builder.display_set(&intersection), "[]");
         let intersection = builder.intersect(empty, set1234);
-        assert_eq!(builder.display_set(intersection), "[]");
+        assert_eq!(builder.display_set(&intersection), "[]");
         let intersection = builder.intersect(empty, set2457);
-        assert_eq!(builder.display_set(intersection), "[]");
+        assert_eq!(builder.display_set(&intersection), "[]");
         let intersection = builder.intersect(set1, set1234);
-        assert_eq!(builder.display_set(intersection), "[1]");
+        assert_eq!(builder.display_set(&intersection), "[1]");
         let intersection = builder.intersect(set1, set2457);
-        assert_eq!(builder.display_set(intersection), "[]");
+        assert_eq!(builder.display_set(&intersection), "[]");
         let intersection = builder.intersect(set2, set1234);
-        assert_eq!(builder.display_set(intersection), "[2]");
+        assert_eq!(builder.display_set(&intersection), "[2]");
         let intersection = builder.intersect(set2, set2457);
-        assert_eq!(builder.display_set(intersection), "[2]");
+        assert_eq!(builder.display_set(&intersection), "[2]");
         let intersection = builder.intersect(set1234, set2457);
-        assert_eq!(builder.display_set(intersection), "[2, 4]");
+        assert_eq!(builder.display_set(&intersection), "[2, 4]");
     }
 
     #[test]
@@ -544,33 +610,34 @@ mod tests {
         let set2457 = builder.insert(set245, 7);
 
         let union = builder.union(empty, empty);
-        assert_eq!(builder.display_set(union), "[]");
+        assert_eq!(builder.display_set(&union), "[]");
         let union = builder.union(empty, set1234);
-        assert_eq!(builder.display_set(union), "[1, 2, 3, 4]");
+        assert_eq!(builder.display_set(&union), "[1, 2, 3, 4]");
         let union = builder.union(empty, set2457);
-        assert_eq!(builder.display_set(union), "[2, 4, 5, 7]");
+        assert_eq!(builder.display_set(&union), "[2, 4, 5, 7]");
         let union = builder.union(set1, set1234);
-        assert_eq!(builder.display_set(union), "[1, 2, 3, 4]");
+        assert_eq!(builder.display_set(&union), "[1, 2, 3, 4]");
         let union = builder.union(set1, set2457);
-        assert_eq!(builder.display_set(union), "[1, 2, 4, 5, 7]");
+        assert_eq!(builder.display_set(&union), "[1, 2, 4, 5, 7]");
         let union = builder.union(set2, set1234);
-        assert_eq!(builder.display_set(union), "[1, 2, 3, 4]");
+        assert_eq!(builder.display_set(&union), "[1, 2, 3, 4]");
         let union = builder.union(set2, set2457);
-        assert_eq!(builder.display_set(union), "[2, 4, 5, 7]");
+        assert_eq!(builder.display_set(&union), "[2, 4, 5, 7]");
         let union = builder.union(set1234, set2457);
-        assert_eq!(builder.display_set(union), "[1, 2, 3, 4, 5, 7]");
+        assert_eq!(builder.display_set(&union), "[1, 2, 3, 4, 5, 7]");
     }
 
     // ----
     // Maps
 
-    impl<K, V> ListStorage<K, V>
+    impl<K, V> ListBuilder<K, V>
     where
         K: Display,
         V: Display,
     {
-        fn display(&self, list: List<K, V>) -> String {
-            let entries: Vec<_> = self.iter_reverse(list).collect();
+        fn display(&self, list: &List<K, V>) -> String {
+            let list = self.read(list);
+            let entries: Vec<_> = list.iter_reverse().collect();
             let mut result = String::new();
             result.push('[');
             for (key, value) in entries.into_iter().rev() {
@@ -594,22 +661,22 @@ mod tests {
         let map12 = builder.insert_if_vacant(map1, 2, 2);
         let map123 = builder.insert_if_vacant(map12, 3, 3);
         let map1232 = builder.insert_if_vacant(map123, 2, 4);
-        assert_eq!(builder.display(empty), "[]");
-        assert_eq!(builder.display(map1), "[1:1]");
-        assert_eq!(builder.display(map12), "[1:1, 2:2]");
-        assert_eq!(builder.display(map123), "[1:1, 2:2, 3:3]");
-        assert_eq!(builder.display(map1232), "[1:1, 2:2, 3:3]");
+        assert_eq!(builder.display(&empty), "[]");
+        assert_eq!(builder.display(&map1), "[1:1]");
+        assert_eq!(builder.display(&map12), "[1:1, 2:2]");
+        assert_eq!(builder.display(&map123), "[1:1, 2:2, 3:3]");
+        assert_eq!(builder.display(&map1232), "[1:1, 2:2, 3:3]");
 
         // And in reverse order
         let map3 = builder.insert_if_vacant(empty, 3, 3);
         let map32 = builder.insert_if_vacant(map3, 2, 2);
         let map321 = builder.insert_if_vacant(map32, 1, 1);
         let map3212 = builder.insert_if_vacant(map321, 2, 4);
-        assert_eq!(builder.display(empty), "[]");
-        assert_eq!(builder.display(map3), "[3:3]");
-        assert_eq!(builder.display(map32), "[2:2, 3:3]");
-        assert_eq!(builder.display(map321), "[1:1, 2:2, 3:3]");
-        assert_eq!(builder.display(map3212), "[1:1, 2:2, 3:3]");
+        assert_eq!(builder.display(&empty), "[]");
+        assert_eq!(builder.display(&map3), "[3:3]");
+        assert_eq!(builder.display(&map32), "[2:2, 3:3]");
+        assert_eq!(builder.display(&map321), "[1:1, 2:2, 3:3]");
+        assert_eq!(builder.display(&map3212), "[1:1, 2:2, 3:3]");
     }
 
     #[test]
@@ -628,21 +695,21 @@ mod tests {
         let map2457 = builder.insert_if_vacant(map245, 7, 70);
 
         let intersection = builder.intersect_with(empty, empty, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[]");
+        assert_eq!(builder.display(&intersection), "[]");
         let intersection = builder.intersect_with(empty, map1234, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[]");
+        assert_eq!(builder.display(&intersection), "[]");
         let intersection = builder.intersect_with(empty, map2457, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[]");
+        assert_eq!(builder.display(&intersection), "[]");
         let intersection = builder.intersect_with(map1, map1234, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[1:2]");
+        assert_eq!(builder.display(&intersection), "[1:2]");
         let intersection = builder.intersect_with(map1, map2457, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[]");
+        assert_eq!(builder.display(&intersection), "[]");
         let intersection = builder.intersect_with(map2, map1234, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[2:22]");
+        assert_eq!(builder.display(&intersection), "[2:22]");
         let intersection = builder.intersect_with(map2, map2457, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[2:40]");
+        assert_eq!(builder.display(&intersection), "[2:40]");
         let intersection = builder.intersect_with(map1234, map2457, |a, b| a + b);
-        assert_eq!(builder.display(intersection), "[2:22, 4:44]");
+        assert_eq!(builder.display(&intersection), "[2:22, 4:44]");
     }
 
     #[test]
@@ -661,21 +728,24 @@ mod tests {
         let map2457 = builder.insert_if_vacant(map245, 7, 70);
 
         let union = builder.union_with(empty, empty, |a, b| a + b);
-        assert_eq!(builder.display(union), "[]");
+        assert_eq!(builder.display(&union), "[]");
         let union = builder.union_with(empty, map1234, |a, b| a + b);
-        assert_eq!(builder.display(union), "[1:1, 2:2, 3:3, 4:4]");
+        assert_eq!(builder.display(&union), "[1:1, 2:2, 3:3, 4:4]");
         let union = builder.union_with(empty, map2457, |a, b| a + b);
-        assert_eq!(builder.display(union), "[2:20, 4:40, 5:50, 7:70]");
+        assert_eq!(builder.display(&union), "[2:20, 4:40, 5:50, 7:70]");
         let union = builder.union_with(map1, map1234, |a, b| a + b);
-        assert_eq!(builder.display(union), "[1:2, 2:2, 3:3, 4:4]");
+        assert_eq!(builder.display(&union), "[1:2, 2:2, 3:3, 4:4]");
         let union = builder.union_with(map1, map2457, |a, b| a + b);
-        assert_eq!(builder.display(union), "[1:1, 2:20, 4:40, 5:50, 7:70]");
+        assert_eq!(builder.display(&union), "[1:1, 2:20, 4:40, 5:50, 7:70]");
         let union = builder.union_with(map2, map1234, |a, b| a + b);
-        assert_eq!(builder.display(union), "[1:1, 2:22, 3:3, 4:4]");
+        assert_eq!(builder.display(&union), "[1:1, 2:22, 3:3, 4:4]");
         let union = builder.union_with(map2, map2457, |a, b| a + b);
-        assert_eq!(builder.display(union), "[2:40, 4:40, 5:50, 7:70]");
+        assert_eq!(builder.display(&union), "[2:40, 4:40, 5:50, 7:70]");
         let union = builder.union_with(map1234, map2457, |a, b| a + b);
-        assert_eq!(builder.display(union), "[1:1, 2:22, 3:3, 4:44, 5:50, 7:70]");
+        assert_eq!(
+            builder.display(&union),
+            "[1:1, 2:22, 3:3, 4:44, 5:50, 7:70]"
+        );
     }
 }
 
@@ -714,7 +784,8 @@ mod property_tests {
         let mut builder = ListBuilder::default();
         let set = builder.set_from_elements(&elements);
         let expected: BTreeSet<_> = elements.iter().copied().collect();
-        let actual = builder.iter_set_reverse(set).copied();
+        let set = builder.read(&set);
+        let actual = set.iter_set_reverse().copied();
         actual.eq(expected.into_iter().rev())
     }
 
@@ -729,7 +800,8 @@ mod property_tests {
         let a_set: BTreeSet<_> = a_elements.iter().copied().collect();
         let b_set: BTreeSet<_> = b_elements.iter().copied().collect();
         let expected: Vec<_> = a_set.intersection(&b_set).copied().collect();
-        let actual = builder.iter_set_reverse(intersection).copied();
+        let intersection = builder.read(&intersection);
+        let actual = intersection.iter_set_reverse().copied();
         actual.eq(expected.into_iter().rev())
     }
 
@@ -744,7 +816,8 @@ mod property_tests {
         let a_set: BTreeSet<_> = a_elements.iter().copied().collect();
         let b_set: BTreeSet<_> = b_elements.iter().copied().collect();
         let expected: Vec<_> = a_set.union(&b_set).copied().collect();
-        let actual = builder.iter_set_reverse(union).copied();
+        let union = builder.read(&union);
+        let actual = union.iter_set_reverse().copied();
         actual.eq(expected.into_iter().rev())
     }
 
@@ -790,7 +863,8 @@ mod property_tests {
         let mut builder = ListBuilder::default();
         let list = builder.set_from_pairs(&pairs);
         let expected: BTreeMap<_, _> = pairs.iter().copied().collect();
-        let actual = builder.iter_reverse(list).map(|(k, v)| (*k, *v));
+        let list = builder.read(&list);
+        let actual = list.iter_reverse().map(|(k, v)| (*k, *v));
         actual.eq(expected.into_iter().rev())
     }
 
@@ -812,7 +886,8 @@ mod property_tests {
             .into_iter()
             .filter_map(|(k, (v1, v2))| Some((k, v1? + v2?)))
             .collect();
-        let actual = builder.iter_reverse(intersection).map(|(k, v)| (*k, *v));
+        let intersection = builder.read(&intersection);
+        let actual = intersection.iter_reverse().map(|(k, v)| (*k, *v));
         actual.eq(expected.into_iter().rev())
     }
 
@@ -831,7 +906,8 @@ mod property_tests {
             .into_iter()
             .map(|(k, (v1, v2))| (k, v1.unwrap_or_default() + v2.unwrap_or_default()))
             .collect();
-        let actual = builder.iter_reverse(union).map(|(k, v)| (*k, *v));
+        let union = builder.read(&union);
+        let actual = union.iter_reverse().map(|(k, v)| (*k, *v));
         actual.eq(expected.into_iter().rev())
     }
 }

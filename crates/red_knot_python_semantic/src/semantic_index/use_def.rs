@@ -266,7 +266,8 @@ use self::symbol_state::{
 use crate::semantic_index::ast_ids::ScopedUseId;
 use crate::semantic_index::definition::Definition;
 use crate::semantic_index::narrowing_constraints::{
-    NarrowingConstraints, NarrowingConstraintsBuilder, NarrowingConstraintsIterator,
+    NarrowingConstraintIterator, NarrowingConstraintReadGuard, NarrowingConstraints,
+    NarrowingConstraintsBuilder,
 };
 use crate::semantic_index::predicate::{
     Predicate, Predicates, PredicatesBuilder, ScopedPredicateId,
@@ -438,11 +439,9 @@ impl<'map, 'db> Iterator for BindingWithConstraintsIterator<'map, 'db> {
             .next()
             .map(|live_binding| BindingWithConstraints {
                 binding: self.all_definitions[live_binding.binding],
-                narrowing_constraint: ConstraintsIterator {
-                    predicates,
-                    constraint_ids: narrowing_constraints
-                        .iter_predicates(live_binding.narrowing_constraint),
-                },
+                predicates,
+                narrowing_constraint: narrowing_constraints
+                    .read(&live_binding.narrowing_constraint),
                 visibility_constraint: live_binding.visibility_constraint,
             })
     }
@@ -452,13 +451,23 @@ impl std::iter::FusedIterator for BindingWithConstraintsIterator<'_, '_> {}
 
 pub(crate) struct BindingWithConstraints<'map, 'db> {
     pub(crate) binding: Option<Definition<'db>>,
-    pub(crate) narrowing_constraint: ConstraintsIterator<'map, 'db>,
+    predicates: &'map Predicates<'db>,
+    narrowing_constraint: NarrowingConstraintReadGuard<'map>,
     pub(crate) visibility_constraint: ScopedVisibilityConstraintId,
+}
+
+impl<'map, 'db> BindingWithConstraints<'map, 'db> {
+    pub(crate) fn narrowing_constraint(&'map self) -> ConstraintsIterator<'map, 'db> {
+        ConstraintsIterator {
+            predicates: self.predicates,
+            constraint_ids: self.narrowing_constraint.iter_predicates(),
+        }
+    }
 }
 
 pub(crate) struct ConstraintsIterator<'map, 'db> {
     predicates: &'map Predicates<'db>,
-    constraint_ids: NarrowingConstraintsIterator<'map>,
+    constraint_ids: NarrowingConstraintIterator<'map>,
 }
 
 impl<'db> Iterator for ConstraintsIterator<'_, 'db> {

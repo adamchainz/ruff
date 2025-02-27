@@ -550,52 +550,47 @@ fn symbol_from_bindings_impl<'db>(
         Some(BindingWithConstraints {
             binding,
             visibility_constraint,
-            narrowing_constraint: _,
+            ..
         }) if binding.map_or(true, is_non_exported) => {
             visibility_constraints.evaluate(db, predicates, *visibility_constraint)
         }
         _ => Truthiness::AlwaysFalse,
     };
 
-    let mut types = bindings_with_constraints.filter_map(
-        |BindingWithConstraints {
-             binding,
-             narrowing_constraint,
-             visibility_constraint,
-         }| {
-            let binding = binding?;
+    let mut types = bindings_with_constraints.filter_map(|bwc| {
+        let binding = bwc.binding?;
 
-            if is_non_exported(binding) {
-                return None;
-            }
+        if is_non_exported(binding) {
+            return None;
+        }
 
-            let static_visibility =
-                visibility_constraints.evaluate(db, predicates, visibility_constraint);
+        let static_visibility =
+            visibility_constraints.evaluate(db, predicates, bwc.visibility_constraint);
 
-            if static_visibility.is_always_false() {
-                return None;
-            }
+        if static_visibility.is_always_false() {
+            return None;
+        }
 
-            let constraint_tys: Vec<_> = narrowing_constraint
-                .filter_map(|constraint| infer_narrowing_constraint(db, constraint, binding))
-                .collect();
+        let constraint_tys: Vec<_> = bwc
+            .narrowing_constraint()
+            .filter_map(|constraint| infer_narrowing_constraint(db, constraint, binding))
+            .collect();
 
-            let binding_ty = binding_type(db, binding);
-            if constraint_tys.is_empty() {
-                Some(binding_ty)
-            } else {
-                let intersection_ty = constraint_tys
-                    .into_iter()
-                    .rev()
-                    .fold(
-                        IntersectionBuilder::new(db).add_positive(binding_ty),
-                        IntersectionBuilder::add_positive,
-                    )
-                    .build();
-                Some(intersection_ty)
-            }
-        },
-    );
+        let binding_ty = binding_type(db, binding);
+        if constraint_tys.is_empty() {
+            Some(binding_ty)
+        } else {
+            let intersection_ty = constraint_tys
+                .into_iter()
+                .rev()
+                .fold(
+                    IntersectionBuilder::new(db).add_positive(binding_ty),
+                    IntersectionBuilder::add_positive,
+                )
+                .build();
+            Some(intersection_ty)
+        }
+    });
 
     if let Some(first) = types.next() {
         let boundness = match unbound_visibility {

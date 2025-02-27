@@ -28,7 +28,7 @@
 //!
 //! [`Predicate`]: crate::semantic_index::predicate::Predicate
 
-use ruff_index::list::{List, ListBuilder, ListSetReverseIterator, ListStorage};
+use ruff_index::list::{List, ListBuilder, ListReadGuard, ListSetReverseIterator, ListStorage};
 
 use crate::semantic_index::predicate::ScopedPredicateId;
 
@@ -73,7 +73,7 @@ pub(crate) struct NarrowingConstraints {
 // --------------------
 
 /// A builder for creating narrowing constraints.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct NarrowingConstraintsBuilder {
     lists: ListBuilder<ScopedNarrowingConstraintPredicate>,
 }
@@ -108,16 +108,25 @@ impl NarrowingConstraintsBuilder {
 // Iteration
 // ---------
 
-pub(crate) type NarrowingConstraintsIterator<'a> =
+pub(crate) struct NarrowingConstraintReadGuard<'a>(
+    ListReadGuard<'a, ScopedNarrowingConstraintPredicate>,
+);
+
+pub(crate) type NarrowingConstraintIterator<'a> =
     std::iter::Copied<ListSetReverseIterator<'a, ScopedNarrowingConstraintPredicate>>;
 
 impl NarrowingConstraints {
+    /// Provides read access to a narrowing constraint. Returns a guard that maintains a read lock
+    /// on the underlying storage.
+    pub(crate) fn read(&self, set: &ScopedNarrowingConstraint) -> NarrowingConstraintReadGuard<'_> {
+        NarrowingConstraintReadGuard(self.lists.read(set))
+    }
+}
+
+impl NarrowingConstraintReadGuard<'_> {
     /// Iterates over the predicates in a narrowing constraint.
-    pub(crate) fn iter_predicates(
-        &self,
-        set: ScopedNarrowingConstraint,
-    ) -> NarrowingConstraintsIterator<'_> {
-        self.lists.iter_set_reverse(set).copied()
+    pub(crate) fn iter_predicates(&self) -> NarrowingConstraintIterator<'_> {
+        self.0.iter_set_reverse().copied()
     }
 }
 
@@ -135,11 +144,11 @@ mod tests {
     }
 
     impl NarrowingConstraintsBuilder {
-        pub(crate) fn iter_predicates(
+        pub(crate) fn read(
             &self,
-            set: ScopedNarrowingConstraint,
-        ) -> NarrowingConstraintsIterator<'_> {
-            self.lists.iter_set_reverse(set).copied()
+            set: &ScopedNarrowingConstraint,
+        ) -> NarrowingConstraintReadGuard<'_> {
+            NarrowingConstraintReadGuard(self.lists.read(set))
         }
     }
 }
