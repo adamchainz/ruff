@@ -1618,8 +1618,8 @@ impl<'db> TypeInferenceBuilder<'db> {
 
         let context_manager_ty = context_expression_ty.to_meta_type(self.db());
 
-        let enter = context_manager_ty.member(self.db(), "__enter__");
-        let exit = context_manager_ty.member(self.db(), "__exit__");
+        let enter = context_manager_ty.member(self.db(), "__enter__").0;
+        let exit = context_manager_ty.member(self.db(), "__exit__").0;
 
         // TODO: Make use of Protocols when we support it (the manager be assignable to `contextlib.AbstractContextManager`).
         match (enter, exit) {
@@ -2260,6 +2260,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                 if let Symbol::Type(class_member, boundness) = instance
                     .class()
                     .class_member(self.db(), op.in_place_dunder())
+                    .0
                 {
                     let call = class_member.try_call(
                         self.db(),
@@ -2675,7 +2676,7 @@ impl<'db> TypeInferenceBuilder<'db> {
         } = alias;
 
         // First try loading the requested attribute from the module.
-        if let Symbol::Type(ty, boundness) = module_ty.member(self.db(), name) {
+        if let Symbol::Type(ty, boundness) = module_ty.member(self.db(), name).0 {
             if boundness == Boundness::PossiblyUnbound {
                 // TODO: Consider loading _both_ the attribute and any submodule and unioning them
                 // together if the attribute exists but is possibly-unbound.
@@ -3554,7 +3555,7 @@ impl<'db> TypeInferenceBuilder<'db> {
             symbol_from_bindings(db, use_def.bindings_at_use(use_id))
         };
 
-        let symbol = local_scope_symbol.or_fall_back_to(db, || {
+        let symbol = SymbolAndQualifiers::from(local_scope_symbol).or_fall_back_to(db, || {
             let has_bindings_in_this_scope = match symbol_table.symbol_by_name(symbol_name) {
                 Some(symbol) => symbol.is_bound(),
                 None => {
@@ -3576,7 +3577,7 @@ impl<'db> TypeInferenceBuilder<'db> {
             // function-like scope, it is considered a local variable; it never references another
             // scope. (At runtime, it would use the `LOAD_FAST` opcode.)
             if has_bindings_in_this_scope && scope.is_function_like(db) {
-                return Symbol::Unbound;
+                return Symbol::Unbound.into();
             }
 
             let current_file = self.file();
@@ -3606,7 +3607,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                         symbol_name,
                         file_scope_id,
                     ) {
-                        return symbol_from_bindings(db, bindings);
+                        return symbol_from_bindings(db, bindings).into();
                     }
                 }
 
@@ -3625,12 +3626,12 @@ impl<'db> TypeInferenceBuilder<'db> {
                 }
             }
 
-            Symbol::Unbound
+            SymbolAndQualifiers::from(Symbol::Unbound)
                 // No nonlocal binding? Check the module's explicit globals.
                 // Avoid infinite recursion if `self.scope` already is the module's global scope.
                 .or_fall_back_to(db, || {
                     if file_scope_id.is_global() {
-                        return Symbol::Unbound;
+                        return Symbol::Unbound.into();
                     }
 
                     if !self.is_deferred() {
@@ -3639,7 +3640,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                             symbol_name,
                             file_scope_id,
                         ) {
-                            return symbol_from_bindings(db, bindings);
+                            return symbol_from_bindings(db, bindings).into();
                         }
                     }
 
@@ -3653,7 +3654,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                 // (without infinite recursion if we're already in builtins.)
                 .or_fall_back_to(db, || {
                     if Some(self.scope()) == builtins_module_scope(db) {
-                        Symbol::Unbound
+                        Symbol::Unbound.into()
                     } else {
                         builtins_symbol(db, symbol_name)
                     }
@@ -3671,21 +3672,23 @@ impl<'db> TypeInferenceBuilder<'db> {
                         );
                         typing_extensions_symbol(db, symbol_name)
                     } else {
-                        Symbol::Unbound
+                        Symbol::Unbound.into()
                     }
                 })
         });
 
-        symbol.unwrap_with_diagnostic(|lookup_error| match lookup_error {
-            LookupError::Unbound => {
-                report_unresolved_reference(&self.context, name_node);
-                Type::unknown()
-            }
-            LookupError::PossiblyUnbound(type_when_bound) => {
-                report_possibly_unresolved_reference(&self.context, name_node);
-                type_when_bound
-            }
-        })
+        symbol
+            .unwrap_with_diagnostic(|lookup_error| match lookup_error {
+                LookupError::Unbound => {
+                    report_unresolved_reference(&self.context, name_node);
+                    TypeAndQualifiers::new(Type::unknown(), TypeQualifiers::empty())
+                }
+                LookupError::PossiblyUnbound(type_when_bound) => {
+                    report_possibly_unresolved_reference(&self.context, name_node);
+                    type_when_bound
+                }
+            })
+            .inner_type()
     }
 
     fn infer_name_expression(&mut self, name: &ast::ExprName) -> Type<'db> {
@@ -3751,7 +3754,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                         );
                     }
 
-                    Type::unknown()
+                    Type::unknown().into()
                 }
                 LookupError::PossiblyUnbound(type_when_bound) => {
                     self.context.report_lint(
@@ -3765,7 +3768,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                     );
                     type_when_bound
                 }
-            })
+            }).inner_type()
     }
 
     fn infer_attribute_expression(&mut self, attribute: &ast::ExprAttribute) -> Type<'db> {
@@ -3783,7 +3786,7 @@ impl<'db> TypeInferenceBuilder<'db> {
 
                 let symbol = match value_ty {
                     Type::Instance(instance) => {
-                        let instance_member = instance.class().instance_member(self.db(), attr);
+                        let instance_member = instance.class().class_member(self.db(), attr);
                         if instance_member.is_class_var() {
                             self.context.report_lint(
                                 &INVALID_ATTRIBUTE_ACCESS,
@@ -3798,7 +3801,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                         instance_member.0
                     }
                     Type::ClassLiteral(_) | Type::SubclassOf(_) => {
-                        let class_member = value_ty.member(self.db(), attr);
+                        let class_member = value_ty.member(self.db(), attr).0;
 
                         if class_member.is_unbound() {
                             let class = match value_ty {
@@ -3829,7 +3832,7 @@ impl<'db> TypeInferenceBuilder<'db> {
 
                         class_member
                     }
-                    _ => value_ty.member(self.db(), attr),
+                    _ => value_ty.member(self.db(), attr).0,
                 };
 
                 // TODO: The unbound-case might also yield a diagnostic, but we can not activate
@@ -4151,11 +4154,11 @@ impl<'db> TypeInferenceBuilder<'db> {
                 let right_class = right_ty.to_meta_type(self.db());
                 if left_ty != right_ty && right_ty.is_subtype_of(self.db(), left_ty) {
                     let reflected_dunder = op.reflected_dunder();
-                    let rhs_reflected = right_class.member(self.db(), reflected_dunder);
+                    let rhs_reflected = right_class.member(self.db(), reflected_dunder).0;
                     // TODO: if `rhs_reflected` is possibly unbound, we should union the two possible
                     // CallOutcomes together
                     if !rhs_reflected.is_unbound()
-                        && rhs_reflected != left_class.member(self.db(), reflected_dunder)
+                        && rhs_reflected != left_class.member(self.db(), reflected_dunder).0
                     {
                         return right_ty
                             .try_call_dunder(
@@ -4887,7 +4890,7 @@ impl<'db> TypeInferenceBuilder<'db> {
     ) -> Result<Type<'db>, CompareUnsupportedError<'db>> {
         let db = self.db();
 
-        let contains_dunder = right.class().class_member(db, "__contains__");
+        let contains_dunder = right.class().class_member(db, "__contains__").0;
         let compare_result_opt = match contains_dunder {
             Symbol::Type(contains_dunder, Boundness::Bound) => {
                 // If `__contains__` is available, it is used directly for the membership test.
@@ -5206,7 +5209,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                 // method in these `sys.version_info` branches.
                 if value_ty.is_subtype_of(self.db(), KnownClass::Type.to_instance(self.db())) {
                     let dunder_class_getitem_method =
-                        value_ty.member(self.db(), "__class_getitem__");
+                        value_ty.member(self.db(), "__class_getitem__").0;
 
                     match dunder_class_getitem_method {
                         Symbol::Unbound => {}
@@ -6227,6 +6230,7 @@ impl<'db> TypeInferenceBuilder<'db> {
                 // TODO: Check that value type is enum otherwise return None
                 value_ty
                     .member(self.db(), &attr.id)
+                    .0
                     .ignore_possibly_unbound()
                     .unwrap_or(Type::unknown())
             }
@@ -6484,7 +6488,7 @@ mod tests {
             assert_eq!(scope.name(db), *expected_scope_name);
         }
 
-        symbol(db, scope, symbol_name)
+        symbol(db, scope, symbol_name).0
     }
 
     #[track_caller]
@@ -6639,7 +6643,7 @@ mod tests {
             assert_eq!(var_ty.display(&db).to_string(), var);
 
             let expected_name_ty = format!(r#"Literal["{var}"]"#);
-            let name_ty = var_ty.member(&db, "__name__").expect_type();
+            let name_ty = var_ty.member(&db, "__name__").0.expect_type();
             assert_eq!(name_ty.display(&db).to_string(), expected_name_ty);
 
             let KnownInstanceType::TypeVar(typevar) = var_ty.expect_known_instance() else {
@@ -6700,7 +6704,7 @@ mod tests {
         ])?;
 
         let a = system_path_to_file(&db, "/src/a.py").unwrap();
-        let x_ty = global_symbol(&db, a, "x").expect_type();
+        let x_ty = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty.display(&db).to_string(), "int");
 
@@ -6709,7 +6713,7 @@ mod tests {
 
         let a = system_path_to_file(&db, "/src/a.py").unwrap();
 
-        let x_ty_2 = global_symbol(&db, a, "x").expect_type();
+        let x_ty_2 = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty_2.display(&db).to_string(), "bool");
 
@@ -6726,7 +6730,7 @@ mod tests {
         ])?;
 
         let a = system_path_to_file(&db, "/src/a.py").unwrap();
-        let x_ty = global_symbol(&db, a, "x").expect_type();
+        let x_ty = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty.display(&db).to_string(), "int");
 
@@ -6736,7 +6740,7 @@ mod tests {
 
         db.clear_salsa_events();
 
-        let x_ty_2 = global_symbol(&db, a, "x").expect_type();
+        let x_ty_2 = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty_2.display(&db).to_string(), "int");
 
@@ -6762,7 +6766,7 @@ mod tests {
         ])?;
 
         let a = system_path_to_file(&db, "/src/a.py").unwrap();
-        let x_ty = global_symbol(&db, a, "x").expect_type();
+        let x_ty = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty.display(&db).to_string(), "int");
 
@@ -6772,7 +6776,7 @@ mod tests {
 
         db.clear_salsa_events();
 
-        let x_ty_2 = global_symbol(&db, a, "x").expect_type();
+        let x_ty_2 = global_symbol(&db, a, "x").0.expect_type();
 
         assert_eq!(x_ty_2.display(&db).to_string(), "int");
 
@@ -6819,7 +6823,7 @@ mod tests {
         )?;
 
         let file_main = system_path_to_file(&db, "/src/main.py").unwrap();
-        let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+        let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
         assert_eq!(attr_ty.display(&db).to_string(), "Unknown | int | None");
 
         // Change the type of `attr` to `str | None`; this should trigger the type of `x` to be re-inferred
@@ -6834,7 +6838,7 @@ mod tests {
 
         let events = {
             db.clear_salsa_events();
-            let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+            let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
             assert_eq!(attr_ty.display(&db).to_string(), "Unknown | str | None");
             db.take_salsa_events()
         };
@@ -6853,7 +6857,7 @@ mod tests {
 
         let events = {
             db.clear_salsa_events();
-            let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+            let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
             assert_eq!(attr_ty.display(&db).to_string(), "Unknown | str | None");
             db.take_salsa_events()
         };
@@ -6904,7 +6908,7 @@ mod tests {
         )?;
 
         let file_main = system_path_to_file(&db, "/src/main.py").unwrap();
-        let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+        let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
         assert_eq!(attr_ty.display(&db).to_string(), "Unknown | int | None");
 
         // Change the type of `attr` to `str | None`; this should trigger the type of `x` to be re-inferred
@@ -6921,7 +6925,7 @@ mod tests {
 
         let events = {
             db.clear_salsa_events();
-            let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+            let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
             assert_eq!(attr_ty.display(&db).to_string(), "Unknown | str | None");
             db.take_salsa_events()
         };
@@ -6942,7 +6946,7 @@ mod tests {
 
         let events = {
             db.clear_salsa_events();
-            let attr_ty = global_symbol(&db, file_main, "x").expect_type();
+            let attr_ty = global_symbol(&db, file_main, "x").0.expect_type();
             assert_eq!(attr_ty.display(&db).to_string(), "Unknown | str | None");
             db.take_salsa_events()
         };
