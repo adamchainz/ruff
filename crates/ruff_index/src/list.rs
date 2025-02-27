@@ -215,7 +215,7 @@ impl<K, V> ListBuilder<K, V> {
         Some(self.storage.cells.push(ListCell { rest, key, value }))
     }
 
-    /// Returns an entry pointing at where `key` would be inserted into a list.
+    /// Inserts a key and value into a list, if the key is not already present.
     ///
     /// Note that when we add a new element to a list, we might have to clone the keys and values
     /// of some existing elements. This is because list cells are immutable once created, since
@@ -226,7 +226,7 @@ impl<K, V> ListBuilder<K, V> {
     /// entries to duplicate for each insertion. If you construct the list in reverse order, we
     /// will have to duplicate O(n) entries for each insertion, making it _quadratic_ to construct
     /// the entire list.
-    pub fn entry(&mut self, list: List<K, V>, key: K) -> ListEntry<K, V>
+    pub fn insert_if_vacant(&mut self, list: List<K, V>, key: K, value: V) -> List<K, V>
     where
         K: Clone + Ord,
         V: Clone,
@@ -242,25 +242,12 @@ impl<K, V> ListBuilder<K, V> {
         while let Some(curr_id) = curr {
             let cell = &self.storage.cells[curr_id];
             match key.cmp(&cell.key) {
-                // We found an existing entry in the input list with the desired key.
-                Ordering::Equal => {
-                    return ListEntry {
-                        builder: self,
-                        list,
-                        key,
-                        rest: ListTail::Occupied(curr_id),
-                    };
-                }
+                // If the list already contains `key`, we don't need to replace anything, and can
+                // return the original list unmodified.
+                Ordering::Equal => return list,
                 // The input list does not already contain this key, and this is where we should
                 // add it.
-                Ordering::Greater => {
-                    return ListEntry {
-                        builder: self,
-                        list,
-                        key,
-                        rest: ListTail::Vacant(curr_id),
-                    };
-                }
+                Ordering::Greater => break,
                 // If this key is in the list, it's further along. We'll need to create a new cell
                 // for this entry in the result list, so add its contents to the scratch
                 // accumulator.
@@ -273,115 +260,12 @@ impl<K, V> ListBuilder<K, V> {
             }
         }
 
-        // We made it all the way through the list without finding the desired key, so it belongs
-        // at the beginning. (And we will unfortunately have to duplicate every existing cell if
-        // the caller proceeds with inserting the new key!)
-        ListEntry {
-            builder: self,
-            list,
-            key,
-            rest: ListTail::Beginning,
-        }
-    }
-}
-
-/// A view into a list, indicating where a key would be inserted.
-pub struct ListEntry<'a, K, V = ()> {
-    builder: &'a mut ListBuilder<K, V>,
-    list: List<K, V>,
-    key: K,
-    /// Points at the element that already contains `key`, if there is one, or the element
-    /// immediately before where it would go, if not.
-    rest: ListTail<ListCellId>,
-}
-
-enum ListTail<I> {
-    /// The list does not already contain `key`, and it would go at the beginning of the list.
-    Beginning,
-    /// The list already contains `key`
-    Occupied(I),
-    /// The list does not already contain key, and it would go immediately after the given element
-    Vacant(I),
-}
-
-impl<K, V> ListEntry<'_, K, V>
-where
-    K: Clone,
-    V: Clone,
-{
-    fn stitch_up(self, rest: Option<ListCellId>, value: V) -> List<K, V> {
-        let mut last = rest;
-        last = self.builder.add_cell(last, self.key, value);
-        while let Some((key, value)) = self.builder.scratch.pop() {
-            last = self.builder.add_cell(last, key, value);
+        let mut last = curr;
+        last = self.add_cell(last, key, value);
+        while let Some((key, value)) = self.scratch.pop() {
+            last = self.add_cell(last, key, value);
         }
         List::new(last)
-    }
-
-    /// Inserts a new key/value into the list if the key is not already present. If the list
-    /// already contains `key`, we return the original list as-is, and do not invoke your closure.
-    pub fn or_insert_with<F>(self, f: F) -> List<K, V>
-    where
-        F: FnOnce() -> V,
-    {
-        let rest = match self.rest {
-            // If the list already contains `key`, we don't need to replace anything, and can
-            // return the original list unmodified.
-            ListTail::Occupied(_) => return self.list,
-            // Otherwise we have to create a new entry and stitch it onto the list.
-            ListTail::Beginning => None,
-            ListTail::Vacant(index) => Some(index),
-        };
-        self.stitch_up(rest, f())
-    }
-
-    /// Inserts a new key/value into the list if the key is not already present. If the list
-    /// already contains `key`, we return the original list as-is.
-    pub fn or_insert(self, value: V) -> List<K, V> {
-        self.or_insert_with(|| value)
-    }
-
-    /// Inserts a new key and the default value into the list if the key is not already present. If
-    /// the list already contains `key`, we return the original list as-is.
-    pub fn or_insert_default(self) -> List<K, V>
-    where
-        V: Default,
-    {
-        self.or_insert_with(V::default)
-    }
-
-    /// Ensures that the list contains an entry mapping the key to `value`, returning the resulting
-    /// list. Overwrites any existing entry with the same key. As an optimization, if the existing
-    /// entry has an equal _value_, as well, we return the original list as-is.
-    pub fn replace(self, value: V) -> List<K, V>
-    where
-        V: Eq,
-    {
-        // If the list already contains `key`, skip past its entry before we add its replacement.
-        let rest = match self.rest {
-            ListTail::Beginning => None,
-            ListTail::Occupied(index) => {
-                let cell = &self.builder.cells[index];
-                if value == cell.value {
-                    // As an optimization, if value isn't changed, there's no need to stitch up a
-                    // new list.
-                    return self.list;
-                }
-                cell.rest
-            }
-            ListTail::Vacant(index) => Some(index),
-        };
-        self.stitch_up(rest, value)
-    }
-
-    /// Ensures that the list contains an entry mapping the key to the default, returning the
-    /// resulting list. Overwrites any existing entry with the same key. As an optimization, if the
-    /// existing entry has an equal _value_, as well, we return the original list as-is.
-    pub fn replace_with_default(self) -> List<K, V>
-    where
-        V: Default + Eq,
-    {
-        self.replace(V::default())
     }
 }
 
@@ -529,7 +413,7 @@ impl<K> ListBuilder<K, ()> {
     where
         K: Clone + Ord,
     {
-        self.entry(set, element).or_insert_default()
+        self.insert_if_vacant(set, element, ())
     }
 
     /// Returns the intersection of two sets. The result will contain any value that appears in
@@ -706,38 +590,10 @@ mod tests {
 
         // Build up the map in order
         let empty = List::empty();
-        let map1 = builder.entry(empty, 1).replace(1);
-        let map12 = builder.entry(map1, 2).replace(2);
-        let map123 = builder.entry(map12, 3).replace(3);
-        let map1232 = builder.entry(map123, 2).replace(4);
-        assert_eq!(builder.display(empty), "[]");
-        assert_eq!(builder.display(map1), "[1:1]");
-        assert_eq!(builder.display(map12), "[1:1, 2:2]");
-        assert_eq!(builder.display(map123), "[1:1, 2:2, 3:3]");
-        assert_eq!(builder.display(map1232), "[1:1, 2:4, 3:3]");
-
-        // And in reverse order
-        let map3 = builder.entry(empty, 3).replace(3);
-        let map32 = builder.entry(map3, 2).replace(2);
-        let map321 = builder.entry(map32, 1).replace(1);
-        let map3212 = builder.entry(map321, 2).replace(4);
-        assert_eq!(builder.display(empty), "[]");
-        assert_eq!(builder.display(map3), "[3:3]");
-        assert_eq!(builder.display(map32), "[2:2, 3:3]");
-        assert_eq!(builder.display(map321), "[1:1, 2:2, 3:3]");
-        assert_eq!(builder.display(map3212), "[1:1, 2:4, 3:3]");
-    }
-
-    #[test]
-    fn can_insert_if_needed_into_map() {
-        let mut builder = ListBuilder::<u16, u16>::default();
-
-        // Build up the map in order
-        let empty = List::empty();
-        let map1 = builder.entry(empty, 1).or_insert(1);
-        let map12 = builder.entry(map1, 2).or_insert(2);
-        let map123 = builder.entry(map12, 3).or_insert(3);
-        let map1232 = builder.entry(map123, 2).or_insert(4);
+        let map1 = builder.insert_if_vacant(empty, 1, 1);
+        let map12 = builder.insert_if_vacant(map1, 2, 2);
+        let map123 = builder.insert_if_vacant(map12, 3, 3);
+        let map1232 = builder.insert_if_vacant(map123, 2, 4);
         assert_eq!(builder.display(empty), "[]");
         assert_eq!(builder.display(map1), "[1:1]");
         assert_eq!(builder.display(map12), "[1:1, 2:2]");
@@ -745,10 +601,10 @@ mod tests {
         assert_eq!(builder.display(map1232), "[1:1, 2:2, 3:3]");
 
         // And in reverse order
-        let map3 = builder.entry(empty, 3).or_insert(3);
-        let map32 = builder.entry(map3, 2).or_insert(2);
-        let map321 = builder.entry(map32, 1).or_insert(1);
-        let map3212 = builder.entry(map321, 2).or_insert(4);
+        let map3 = builder.insert_if_vacant(empty, 3, 3);
+        let map32 = builder.insert_if_vacant(map3, 2, 2);
+        let map321 = builder.insert_if_vacant(map32, 1, 1);
+        let map3212 = builder.insert_if_vacant(map321, 2, 4);
         assert_eq!(builder.display(empty), "[]");
         assert_eq!(builder.display(map3), "[3:3]");
         assert_eq!(builder.display(map32), "[2:2, 3:3]");
@@ -761,15 +617,15 @@ mod tests {
         let mut builder = ListBuilder::<u16, u16>::default();
 
         let empty = List::empty();
-        let map1 = builder.entry(empty, 1).or_insert(1);
-        let map12 = builder.entry(map1, 2).or_insert(2);
-        let map123 = builder.entry(map12, 3).or_insert(3);
-        let map1234 = builder.entry(map123, 4).or_insert(4);
+        let map1 = builder.insert_if_vacant(empty, 1, 1);
+        let map12 = builder.insert_if_vacant(map1, 2, 2);
+        let map123 = builder.insert_if_vacant(map12, 3, 3);
+        let map1234 = builder.insert_if_vacant(map123, 4, 4);
 
-        let map2 = builder.entry(empty, 2).or_insert(20);
-        let map24 = builder.entry(map2, 4).or_insert(40);
-        let map245 = builder.entry(map24, 5).or_insert(50);
-        let map2457 = builder.entry(map245, 7).or_insert(70);
+        let map2 = builder.insert_if_vacant(empty, 2, 20);
+        let map24 = builder.insert_if_vacant(map2, 4, 40);
+        let map245 = builder.insert_if_vacant(map24, 5, 50);
+        let map2457 = builder.insert_if_vacant(map245, 7, 70);
 
         let intersection = builder.intersect_with(empty, empty, |a, b| a + b);
         assert_eq!(builder.display(intersection), "[]");
@@ -794,15 +650,15 @@ mod tests {
         let mut builder = ListBuilder::<u16, u16>::default();
 
         let empty = List::empty();
-        let map1 = builder.entry(empty, 1).or_insert(1);
-        let map12 = builder.entry(map1, 2).or_insert(2);
-        let map123 = builder.entry(map12, 3).or_insert(3);
-        let map1234 = builder.entry(map123, 4).or_insert(4);
+        let map1 = builder.insert_if_vacant(empty, 1, 1);
+        let map12 = builder.insert_if_vacant(map1, 2, 2);
+        let map123 = builder.insert_if_vacant(map12, 3, 3);
+        let map1234 = builder.insert_if_vacant(map123, 4, 4);
 
-        let map2 = builder.entry(empty, 2).or_insert(20);
-        let map24 = builder.entry(map2, 4).or_insert(40);
-        let map245 = builder.entry(map24, 5).or_insert(50);
-        let map2457 = builder.entry(map245, 7).or_insert(70);
+        let map2 = builder.insert_if_vacant(empty, 2, 20);
+        let map24 = builder.insert_if_vacant(map2, 4, 40);
+        let map245 = builder.insert_if_vacant(map24, 5, 50);
+        let map2457 = builder.insert_if_vacant(map245, 7, 70);
 
         let union = builder.union_with(empty, empty, |a, b| a + b);
         assert_eq!(builder.display(union), "[]");
@@ -897,14 +753,16 @@ mod property_tests {
         K: Clone + Ord,
         V: Clone + Eq,
     {
-        fn set_from_pairs<'a>(&mut self, pairs: impl IntoIterator<Item = &'a (K, V)>) -> List<K, V>
+        fn set_from_pairs<'a, I>(&mut self, pairs: I) -> List<K, V>
         where
             K: 'a,
             V: 'a,
+            I: IntoIterator<Item = &'a (K, V)>,
+            I::IntoIter: DoubleEndedIterator,
         {
             let mut list = List::empty();
-            for (key, value) in pairs {
-                list = self.entry(list, key.clone()).replace(value.clone());
+            for (key, value) in pairs.into_iter().rev() {
+                list = self.insert_if_vacant(list, key.clone(), value.clone());
             }
             list
         }
