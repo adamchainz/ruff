@@ -364,14 +364,12 @@ impl<K, V> List<K, V> {
         result.insert_into_if_vacant(key, value);
         result
     }
-}
 
-impl<K, V> ListBuilder<K, V> {
-    /// Returns the intersection of two lists. The result will contain an entry for any key that
-    /// appears in both lists. The corresponding values will be combined using the `combine`
-    /// function that you provide.
+    /// Updates this list to contain the intersection with another list. The result will contain an
+    /// entry for any key that appears in both lists. The corresponding values will be combined
+    /// using the `combine` function that you provide.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn intersect_with<F>(&mut self, a: List<K, V>, b: List<K, V>, mut combine: F) -> List<K, V>
+    pub fn intersect_with<F>(&mut self, b: &List<K, V>, mut combine: F)
     where
         K: Clone + Ord,
         V: Clone,
@@ -383,7 +381,7 @@ impl<K, V> ListBuilder<K, V> {
         // Zip through the lists, building up the keys/values of the new entries into our scratch
         // vector. Continue until we run out of elements in either list. (Any remaining elements in
         // the other list cannot possibly be in the intersection.)
-        let mut a = a.last;
+        let mut a = self.last;
         let mut b = b.last;
         while let (Some(a_id), Some(b_id)) = (a, b) {
             let a_cell = &inner.cells[a_id];
@@ -412,9 +410,11 @@ impl<K, V> ListBuilder<K, V> {
         while let Some((key, value)) = inner.scratch.pop() {
             last = inner.add_cell(last, key, value);
         }
-        self.new_list(last)
+        self.last = last;
     }
+}
 
+impl<K, V> ListBuilder<K, V> {
     /// Returns the union of two lists. The result will contain an entry for any key that appears
     /// in either list. For keys that appear in both lists, the corresponding values will be
     /// combined using the `combine` function that you provide.
@@ -528,18 +528,18 @@ impl<K> List<K, ()> {
     {
         self.insert_if_vacant(element, ())
     }
-}
 
-impl<K> ListBuilder<K, ()> {
     /// Returns the intersection of two sets. The result will contain any value that appears in
     /// both sets.
-    pub fn intersect(&mut self, a: List<K, ()>, b: List<K, ()>) -> List<K, ()>
+    pub fn intersect(&mut self, b: &List<K, ()>)
     where
         K: Clone + Ord,
     {
-        self.intersect_with(a, b, |(), ()| ())
+        self.intersect_with(b, |(), ()| ());
     }
+}
 
+impl<K> ListBuilder<K, ()> {
     /// Returns the intersection of two sets. The result will contain any value that appears in
     /// either set.
     pub fn union(&mut self, a: List<K, ()>, b: List<K, ()>) -> List<K, ()>
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn can_intersect_sets() {
-        let mut builder = ListBuilder::<u16>::default();
+        let builder = ListBuilder::<u16>::default();
 
         let empty = builder.empty();
         let set1 = empty.insert(1);
@@ -626,21 +626,28 @@ mod tests {
         let set245 = set24.insert(5);
         let set2457 = set245.insert(7);
 
-        let result = builder.intersect(empty.clone(), empty.clone());
+        #[allow(clippy::items_after_statements)]
+        fn intersect(a: &List<u16>, b: &List<u16>) -> List<u16> {
+            let mut result = a.clone();
+            result.intersect(b);
+            result
+        }
+
+        let result = intersect(&empty, &empty);
         assert_eq!(builder.display_set(&result), "[]");
-        let result = builder.intersect(empty.clone(), set1234.clone());
+        let result = intersect(&empty, &set1234);
         assert_eq!(builder.display_set(&result), "[]");
-        let result = builder.intersect(empty.clone(), set2457.clone());
+        let result = intersect(&empty, &set2457);
         assert_eq!(builder.display_set(&result), "[]");
-        let result = builder.intersect(set1.clone(), set1234.clone());
+        let result = intersect(&set1, &set1234);
         assert_eq!(builder.display_set(&result), "[1]");
-        let result = builder.intersect(set1.clone(), set2457.clone());
+        let result = intersect(&set1, &set2457);
         assert_eq!(builder.display_set(&result), "[]");
-        let result = builder.intersect(set2.clone(), set1234.clone());
+        let result = intersect(&set2, &set1234);
         assert_eq!(builder.display_set(&result), "[2]");
-        let result = builder.intersect(set2.clone(), set2457.clone());
+        let result = intersect(&set2, &set2457);
         assert_eq!(builder.display_set(&result), "[2]");
-        let result = builder.intersect(set1234.clone(), set2457.clone());
+        let result = intersect(&set1234, &set2457);
         assert_eq!(builder.display_set(&result), "[2, 4]");
     }
 
@@ -731,7 +738,7 @@ mod tests {
 
     #[test]
     fn can_intersect_maps() {
-        let mut builder = ListBuilder::<u16, u16>::default();
+        let builder = ListBuilder::<u16, u16>::default();
 
         let empty = builder.empty();
         let map1 = empty.insert_if_vacant(1, 1);
@@ -745,29 +752,27 @@ mod tests {
         let map2457 = map245.insert_if_vacant(7, 70);
 
         #[allow(clippy::items_after_statements)]
-        fn intersect(
-            builder: &mut ListBuilder<u16, u16>,
-            a: &List<u16, u16>,
-            b: &List<u16, u16>,
-        ) -> List<u16, u16> {
-            builder.intersect_with(a.clone(), b.clone(), |a, b| a + b)
+        fn intersect(a: &List<u16, u16>, b: &List<u16, u16>) -> List<u16, u16> {
+            let mut result = a.clone();
+            result.intersect_with(b, |a, b| a + b);
+            result
         }
 
-        let result = intersect(&mut builder, &empty, &empty);
+        let result = intersect(&empty, &empty);
         assert_eq!(builder.display(&result), "[]");
-        let result = intersect(&mut builder, &empty, &map1234);
+        let result = intersect(&empty, &map1234);
         assert_eq!(builder.display(&result), "[]");
-        let result = intersect(&mut builder, &empty, &map2457);
+        let result = intersect(&empty, &map2457);
         assert_eq!(builder.display(&result), "[]");
-        let result = intersect(&mut builder, &map1, &map1234);
+        let result = intersect(&map1, &map1234);
         assert_eq!(builder.display(&result), "[1:2]");
-        let result = intersect(&mut builder, &map1, &map2457);
+        let result = intersect(&map1, &map2457);
         assert_eq!(builder.display(&result), "[]");
-        let result = intersect(&mut builder, &map2, &map1234);
+        let result = intersect(&map2, &map1234);
         assert_eq!(builder.display(&result), "[2:22]");
-        let result = intersect(&mut builder, &map2, &map2457);
+        let result = intersect(&map2, &map2457);
         assert_eq!(builder.display(&result), "[2:40]");
-        let result = intersect(&mut builder, &map1234, &map2457);
+        let result = intersect(&map1234, &map2457);
         assert_eq!(builder.display(&result), "[2:22, 4:44]");
     }
 
@@ -864,7 +869,8 @@ mod property_tests {
         let mut builder = ListBuilder::default();
         let a = builder.set_from_elements(&a_elements);
         let b = builder.set_from_elements(&b_elements);
-        let intersection = builder.intersect(a, b);
+        let mut intersection = a;
+        intersection.intersect(&b);
         let a_set: BTreeSet<_> = a_elements.iter().copied().collect();
         let b_set: BTreeSet<_> = b_elements.iter().copied().collect();
         let expected: Vec<_> = a_set.intersection(&b_set).copied().collect();
@@ -943,7 +949,8 @@ mod property_tests {
         let mut builder = ListBuilder::default();
         let a = builder.list_from_pairs(&a_pairs);
         let b = builder.list_from_pairs(&b_pairs);
-        let intersection = builder.intersect_with(a, b, |a, b| a + b);
+        let mut intersection = a;
+        intersection.intersect_with(&b, |a, b| a + b);
         let a_map: BTreeMap<_, _> = a_pairs.iter().copied().collect();
         let b_map: BTreeMap<_, _> = b_pairs.iter().copied().collect();
         let intersection_map = join(&a_map, &b_map);

@@ -102,10 +102,10 @@ impl NarrowingConstraintsBuilder {
     /// that appear in both inputs.
     pub(crate) fn intersect_constraints(
         &mut self,
-        a: ScopedNarrowingConstraint,
-        b: ScopedNarrowingConstraint,
-    ) -> ScopedNarrowingConstraint {
-        self.lists.intersect(a, b)
+        a: &mut ScopedNarrowingConstraint,
+        b: &ScopedNarrowingConstraint,
+    ) {
+        a.intersect(b);
     }
 }
 

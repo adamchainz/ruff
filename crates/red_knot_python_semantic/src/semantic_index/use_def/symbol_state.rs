@@ -295,8 +295,9 @@ impl SymbolBindings {
                     // If the same definition is visible through both paths, any constraint
                     // that applies on only one path is irrelevant to the resulting type from
                     // unioning the two paths, so we intersect the constraints.
-                    let narrowing_constraint = narrowing_constraints
-                        .intersect_constraints(a.narrowing_constraint, b.narrowing_constraint);
+                    let mut narrowing_constraint = a.narrowing_constraint.clone();
+                    narrowing_constraints
+                        .intersect_constraints(&mut narrowing_constraint, &b.narrowing_constraint);
 
                     // For visibility constraints, we merge them using a ternary OR operation:
                     let visibility_constraint = visibility_constraints
