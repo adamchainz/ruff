@@ -838,7 +838,7 @@ _IntegerFormats: TypeAlias = Literal[
 ]
 
 @final
-class memoryview(Sequence[_I]):
+class memoryview:
     @property
     def format(self) -> str: ...
     @property
@@ -967,7 +967,7 @@ class slice(Generic[_StartT, _StopT, _StepT]):
 
     def indices(self, len: SupportsIndex, /) -> tuple[int, int, int]: ...
 
-class tuple(Sequence[_T_co]):
+class tuple:
     def __new__(cls, iterable: Iterable[_T_co] = ..., /) -> Self: ...
     def __len__(self) -> int: ...
     def __contains__(self, key: object, /) -> bool: ...
@@ -1236,7 +1236,7 @@ class enumerate(Generic[_T]):
         def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
 
 @final
-class range(Sequence[int]):
+class range:
     @property
     def start(self) -> int: ...
     @property
