@@ -85,13 +85,17 @@ impl NarrowingConstraintsBuilder {
         }
     }
 
+    pub(crate) fn empty(&mut self) -> ScopedNarrowingConstraint {
+        self.lists.empty()
+    }
+
     /// Adds a predicate to an existing narrowing constraint.
     pub(crate) fn add_predicate_to_constraint(
         &mut self,
-        constraint: ScopedNarrowingConstraint,
+        constraint: &mut ScopedNarrowingConstraint,
         predicate: ScopedNarrowingConstraintPredicate,
-    ) -> ScopedNarrowingConstraint {
-        self.lists.insert(constraint, predicate)
+    ) {
+        constraint.insert_into(predicate);
     }
 
     /// Returns the intersection of two narrowing constraints. The result contains the predicates
@@ -118,8 +122,11 @@ pub(crate) type NarrowingConstraintIterator<'a> =
 impl NarrowingConstraints {
     /// Provides read access to a narrowing constraint. Returns a guard that maintains a read lock
     /// on the underlying storage.
-    pub(crate) fn read(&self, set: &ScopedNarrowingConstraint) -> NarrowingConstraintReadGuard<'_> {
-        NarrowingConstraintReadGuard(self.lists.read(set))
+    pub(crate) fn read<'a>(
+        &self,
+        set: &'a ScopedNarrowingConstraint,
+    ) -> NarrowingConstraintReadGuard<'a> {
+        NarrowingConstraintReadGuard(set.read())
     }
 }
 
@@ -144,11 +151,11 @@ mod tests {
     }
 
     impl NarrowingConstraintsBuilder {
-        pub(crate) fn read(
+        pub(crate) fn read<'a>(
             &self,
-            set: &ScopedNarrowingConstraint,
-        ) -> NarrowingConstraintReadGuard<'_> {
-            NarrowingConstraintReadGuard(self.lists.read(set))
+            set: &'a ScopedNarrowingConstraint,
+        ) -> NarrowingConstraintReadGuard<'a> {
+            NarrowingConstraintReadGuard(set.read())
         }
     }
 }

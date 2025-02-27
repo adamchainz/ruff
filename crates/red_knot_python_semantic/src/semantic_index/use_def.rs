@@ -581,9 +581,10 @@ impl<'db> UseDefMapBuilder<'db> {
     }
 
     pub(super) fn add_symbol(&mut self, symbol: ScopedSymbolId) {
-        let new_symbol = self
-            .symbol_states
-            .push(SymbolState::undefined(self.scope_start_visibility));
+        let new_symbol = self.symbol_states.push(SymbolState::undefined(
+            &mut self.narrowing_constraints,
+            self.scope_start_visibility,
+        ));
         debug_assert_eq!(symbol, new_symbol);
     }
 
@@ -592,7 +593,11 @@ impl<'db> UseDefMapBuilder<'db> {
         let symbol_state = &mut self.symbol_states[symbol];
         self.declarations_by_binding
             .insert(binding, symbol_state.declarations().clone());
-        symbol_state.record_binding(def_id, self.scope_start_visibility);
+        symbol_state.record_binding(
+            &mut self.narrowing_constraints,
+            def_id,
+            self.scope_start_visibility,
+        );
     }
 
     pub(super) fn add_predicate(&mut self, predicate: Predicate<'db>) -> ScopedPredicateId {
@@ -679,7 +684,11 @@ impl<'db> UseDefMapBuilder<'db> {
         let def_id = self.all_definitions.push(Some(definition));
         let symbol_state = &mut self.symbol_states[symbol];
         symbol_state.record_declaration(def_id);
-        symbol_state.record_binding(def_id, self.scope_start_visibility);
+        symbol_state.record_binding(
+            &mut self.narrowing_constraints,
+            def_id,
+            self.scope_start_visibility,
+        );
     }
 
     pub(super) fn record_use(&mut self, symbol: ScopedSymbolId, use_id: ScopedUseId) {
@@ -724,7 +733,7 @@ impl<'db> UseDefMapBuilder<'db> {
         // snapshot, the correct state to fill them in with is "undefined".
         self.symbol_states.resize(
             num_symbols,
-            SymbolState::undefined(self.scope_start_visibility),
+            SymbolState::undefined(&mut self.narrowing_constraints, self.scope_start_visibility),
         );
     }
 
@@ -762,7 +771,10 @@ impl<'db> UseDefMapBuilder<'db> {
                 );
             } else {
                 current.merge(
-                    SymbolState::undefined(snapshot.scope_start_visibility),
+                    SymbolState::undefined(
+                        &mut self.narrowing_constraints,
+                        snapshot.scope_start_visibility,
+                    ),
                     &mut self.narrowing_constraints,
                     &mut self.visibility_constraints,
                 );
